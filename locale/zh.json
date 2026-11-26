@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "设计账本",
+    "description": "按项目分文件的追加式更新日志（真值层）与推算看板（呈现层）。提供 ledger_append / ledger_board / ledger_read 三个工具。真实文件存于项目文件夹，插件只建立规则。"
+  }
+}

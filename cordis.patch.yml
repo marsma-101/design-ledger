@@ -1,0 +1,5 @@
+- insert:
+    - id: design-ledger
+      name: '@local/design-ledger'
+      config:
+        projectsRoot: G:/program/飞书cli/docs

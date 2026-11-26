@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Design ledger",
+    "description": "Append-only update log and derived board files per project. Provides ledger_append, ledger_board, and ledger_read tools."
+  }
+}
