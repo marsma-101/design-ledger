@@ -1,13 +1,17 @@
-// design-ledger：日志+看板插件（规则提供者，真实文件存项目文件夹）
+// design-ledger：日志+看板+知识图谱插件（规则提供者，真实文件存项目文件夹）
 // 能力注册为 DSH 工具，供智能体跨会话调用：
 //   ledger_append  —— 追加一条要求记录到指定项目的日志（真值层，append-only）
 //   ledger_board   —— 依据日志生成/更新该项目的看板文件（推理层）
 //   ledger_read    —— 读取日志或看板
-// 文件位置规则：logs/<项目名>.log.md 与 boards/<项目名>.board.md，存于配置根目录下
+//   ledger_graph_init  —— 在项目下初始化知识图谱套件（模板 HTML+本地d3+空白数据文件）
+//   ledger_graph_update —— 更新图谱数据（校验节点/连线/语法，重生成 json.js 包装）
+// 文件位置规则：logs/<项目名>.log.md、boards/<项目名>.board.md、graphs/<项目名>/ 下图谱文件
 // 注意：不导出 Config 对象（cordis resolveConfig 需要 standard-schema）；
 //       可调参数来自 cordis.patch.yml 里行的 config（apply 的第二参）
 
 export const inject = ['tools']
+
+import { fileURLToPath } from 'node:url'
 
 function safeName(project) {
   if (!/^[a-zA-Z0-9_\u4e00-\u9fa5-]{1,64}$/.test(project)) {
@@ -43,6 +47,12 @@ const MSG_SCHEMA = {
 }
 
 const renderMsg = (_args, v) => [{ type: 'text', text: v?.message ?? String(v) }]
+
+function templatesDir() {
+  // 插件包内 templates/ 目录（安装后 node_modules 链接回本包）
+  const here = fileURLToPath(new URL('.', import.meta.url))
+  return here + 'templates'
+}
 
 export function apply(ctx, rawConfig = {}) {
   const cfg = normalizeConfig(rawConfig)
@@ -147,6 +157,85 @@ export function apply(ctx, rawConfig = {}) {
         return { ok: true, message: await readFile(p, 'utf8') }
       } catch {
         return { ok: true, message: `（尚无文件：${p}）` }
+      }
+    },
+  }))
+
+  disposers.push(ctx.tools.register({
+    name: 'ledger_graph_init',
+    description:
+      '在指定项目下初始化 D3 力导向知识图谱套件：复制内置模板（显示板 HTML+本地 d3.min.js），生成空白数据文件 graph-data.json 与其 JS 包装。产出可直接双击打开的交互图谱。',
+    parameters: {
+      type: 'object',
+      properties: {
+        project: str('项目名'),
+        title: str('图谱标题（可选，默认"<项目名> 知识图谱"）'),
+      },
+      required: ['project'],
+    },
+    output: { schema: MSG_SCHEMA, render: renderMsg },
+    async execute({ project, title }) {
+      try {
+        const name = safeName(project)
+        const { mkdir, copyFile, writeFile } = await import('node:fs/promises')
+        const path = await import('node:path')
+        const dir = path.join(cfg.projectsRoot, 'graphs', name)
+        await mkdir(dir, { recursive: true })
+        const tpl = templatesDir()
+        const graphTitle = title || `${name} 知识图谱`
+        // 复制模板并替换标题
+        let html = await import('node:fs/promises').then(m => m.readFile(path.join(tpl, 'graph-template.html'), 'utf8'))
+        html = html.replace('<title>PrivHub 知识图谱</title>', `<title>${graphTitle}</title>`)
+        await writeFile(path.join(dir, `${name}-graph.html`), html, 'utf8')
+        await copyFile(path.join(tpl, 'd3.min.js'), path.join(dir, 'd3.min.js'))
+        // 空白数据文件
+        const empty = { nodes: [], links: [] }
+        await writeFile(path.join(dir, 'graph-data.json'), JSON.stringify(empty, null, 2), 'utf8')
+        await writeFile(path.join(dir, 'graph-data.json.js'), 'window.GRAPH_DATA = ' + JSON.stringify(empty) + ';', 'utf8')
+        return { ok: true, message: `图谱套件已初始化: ${dir}\\${name}-graph.html（数据文件 graph-data.json，双击 HTML 打开即用）` }
+      } catch (e) {
+        return { ok: false, message: `初始化失败: ${e.message}` }
+      }
+    },
+  }))
+
+  disposers.push(ctx.tools.register({
+    name: 'ledger_graph_update',
+    description:
+      '更新指定项目的知识图谱数据：接收节点与连线数组，做完整性校验（节点无重复/连线无悬空），写回 graph-data.json 并自动重生成 graph-data.json.js 包装。HTML 显示板无需改动。',
+    parameters: {
+      type: 'object',
+      properties: {
+        project: str('项目名'),
+        nodes: str('节点数组 JSON 字符串，每项 {id,name,type,status,shape,desc,doc}；type: I/J/G/base/func；status: confirmed/planned；shape: circle/rect'),
+        links: str('连线数组 JSON 字符串，每项 {source,target,label,kind}；kind: call/data/manage/serve/mount'),
+      },
+      required: ['project', 'nodes', 'links'],
+    },
+    output: { schema: MSG_SCHEMA, render: renderMsg },
+    async execute({ project, nodes, links }) {
+      try {
+        const name = safeName(project)
+        const nodesArr = JSON.parse(nodes)
+        const linksArr = JSON.parse(links)
+        // 校验：节点无重复
+        const ids = nodesArr.map(n => n.id)
+        const dup = ids.filter((v, i) => ids.indexOf(v) !== i)
+        if (dup.length) return { ok: false, message: `校验失败：节点重复 ${dup.join(',')}` }
+        // 校验：连线无悬空
+        const dangling = linksArr.filter(l => !ids.includes(l.source) || !ids.includes(l.target))
+        if (dangling.length) {
+          return { ok: false, message: `校验失败：悬空连线 ${dangling.map(l => l.source + '->' + l.target).join(', ')}` }
+        }
+        const { writeFile } = await import('node:fs/promises')
+        const path = await import('node:path')
+        const dir = path.join(cfg.projectsRoot, 'graphs', name)
+        const jsonStr = JSON.stringify({ nodes: nodesArr, links: linksArr }, null, 2)
+        await writeFile(path.join(dir, 'graph-data.json'), jsonStr, 'utf8')
+        await writeFile(path.join(dir, 'graph-data.json.js'), 'window.GRAPH_DATA = ' + JSON.stringify({ nodes: nodesArr, links: linksArr }) + ';', 'utf8')
+        return { ok: true, message: `图谱数据已更新: ${ids.length} 节点 / ${linksArr.length} 连线（${dir}\\graph-data.json），刷新 HTML 即生效` }
+      } catch (e) {
+        return { ok: false, message: `更新失败: ${e.message}` }
       }
     },
   }))
